@@ -187,6 +187,15 @@ if [ -f "${chroot_dir}/etc/chrony/chrony.conf" ] && \
         "${chroot_dir}/etc/chrony/conf.d/50-ubuntu-rockchip-authselect.conf"
 fi
 
+# The installer that copies a running system onto another disk comes from the
+# ppa only settings package, ship ours when that one is not there
+if [ ! -e "${chroot_dir}/bin/ubuntu-rockchip-install" ] && \
+   [ ! -e "${chroot_dir}/usr/bin/ubuntu-rockchip-install" ]; then
+    install -D -m 755 "${overlay_dir}/usr/bin/ubuntu-rockchip-install" \
+        "${chroot_dir}/usr/bin/ubuntu-rockchip-install"
+    echo "Installed ubuntu-rockchip-install"
+fi
+
 # Extra kernel parameters, for debugging a board without editing an image
 if [[ -n ${KERNEL_CMDLINE_EXTRA} ]]; then
     echo -n " ${KERNEL_CMDLINE_EXTRA}" >> "${chroot_dir}/etc/kernel/cmdline"

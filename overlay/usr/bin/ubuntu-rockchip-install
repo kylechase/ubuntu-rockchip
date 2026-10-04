@@ -1,0 +1,255 @@
+#!/bin/bash
+# Install the running system onto another disk, for moving a board that boots
+# from an sd card or the emmc onto faster or larger storage.
+
+set -eE
+trap 'echo "Error: ${0##*/} failed on line ${LINENO}" >&2' ERR
+
+usage() {
+cat << HEREDOC
+Usage: ${0##*/} [options] /dev/nvme0n1
+
+Copies the running system to a target disk and makes it bootable.
+
+Options:
+  -b, --boot=WHERE   where the kernel, the initrd and the extlinux config live:
+                       target  (default) on the target disk, which the
+                               bootloader has to be able to read
+                       current keep them on the disk this system booted from
+                               and mount that disk's /boot over the /boot of
+                               the installed system
+  -l, --label=LABEL  filesystem label for the new root, default "rootfs"
+  -u, --bootloader   write U-Boot to the target disk as well; the default is to
+                     do that for sd and emmc targets, which the boot rom can
+                     read, and to skip it otherwise
+  -n, --no-bootloader  never write U-Boot to the target disk
+  -y, --yes          do not ask before erasing the target disk
+  -h, --help         show this help message and exit
+
+Boards whose U-Boot cannot read the target disk, which is the case for NVMe on
+the Turing RK1, need --boot=current: the bootloader keeps reading the disk it
+reads today and only the root filesystem moves. Kernel updates stay correct
+either way, --boot=current mounts the boot disk so that updates land on it.
+HEREDOC
+}
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "Please run as root"
+    exit 1
+fi
+
+boot_where="target"
+label="rootfs"
+bootloader="auto"
+assume_yes="N"
+target=""
+
+while [ "$#" -gt 0 ]; do
+    case "${1}" in
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        -b=*|--boot=*)
+            boot_where="${1#*=}"
+            shift
+            ;;
+        -b|--boot)
+            boot_where="${2}"
+            shift 2
+            ;;
+        -l=*|--label=*)
+            label="${1#*=}"
+            shift
+            ;;
+        -l|--label)
+            label="${2}"
+            shift 2
+            ;;
+        -u|--bootloader)
+            bootloader="Y"
+            shift
+            ;;
+        -n|--no-bootloader)
+            bootloader="N"
+            shift
+            ;;
+        -y|--yes)
+            assume_yes="Y"
+            shift
+            ;;
+        -*)
+            echo "Error: unknown argument \"${1}\""
+            exit 1
+            ;;
+        *)
+            target="${1}"
+            shift
+            ;;
+    esac
+done
+
+if [ -z "${target}" ]; then
+    usage
+    exit 1
+fi
+
+missing=()
+for tool in rsync sgdisk wipefs partprobe udevadm blkid lsblk mkfs.ext4 findmnt; do
+    command -v "${tool}" > /dev/null || missing+=("${tool}")
+done
+if [ "${#missing[@]}" -ne 0 ]; then
+    echo "Error: missing tools: ${missing[*]}"
+    echo "Install them with: apt-get install rsync gdisk parted e2fsprogs util-linux"
+    exit 1
+fi
+
+if [ "${boot_where}" != "target" ] && [ "${boot_where}" != "current" ]; then
+    echo "Error: --boot takes \"target\" or \"current\""
+    exit 1
+fi
+
+if [ ! -b "${target}" ]; then
+    echo "Error: ${target} is not a block device"
+    exit 1
+fi
+
+# The disk this system runs from, which must not be the target
+root_source="$(findmnt -no SOURCE /)"
+root_parent="$(lsblk -no PKNAME "${root_source}" | head -n1)"
+if [ -n "${root_parent}" ] && [ "/dev/${root_parent}" == "${target}" ]; then
+    echo "Error: ${target} is the disk this system booted from"
+    exit 1
+fi
+
+if [ -n "$(lsblk -no MOUNTPOINTS "${target}" | tr -d ' \n')" ]; then
+    echo "Error: ${target} has mounted partitions, unmount them first"
+    lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINTS "${target}"
+    exit 1
+fi
+
+# Enough room for what is in use, with a little headroom
+used_kb="$(df -k --output=used / | tail -n1 | tr -d ' ')"
+size_kb="$(( $(blockdev --getsize64 "${target}") / 1024 ))"
+if [ "${size_kb}" -lt "$(( used_kb + 262144 ))" ]; then
+    echo "Error: ${target} holds ${size_kb} KiB, the system in use needs ${used_kb} KiB"
+    exit 1
+fi
+
+# The boot rom can only load a bootloader from sd or emmc
+if [ "${bootloader}" == "auto" ]; then
+    case "${target}" in
+        /dev/mmcblk*) bootloader="Y" ;;
+        *)            bootloader="N" ;;
+    esac
+fi
+
+if [ "${bootloader}" == "Y" ] && [ ! -f /usr/lib/u-boot/u-boot-rockchip.bin ]; then
+    echo "Error: /usr/lib/u-boot/u-boot-rockchip.bin is missing, pass --no-bootloader"
+    exit 1
+fi
+
+echo
+echo "About to install the running system to ${target}:"
+echo
+lsblk -o NAME,SIZE,FSTYPE,LABEL "${target}"
+echo
+echo "  everything on ${target} will be erased"
+echo "  /boot will live on $([ "${boot_where}" == "target" ] && echo "${target}" || echo "/dev/${root_parent}")"
+echo "  U-Boot will $([ "${bootloader}" == "Y" ] && echo "be written to ${target}" || echo "not be touched")"
+echo
+if [ "${assume_yes}" != "Y" ]; then
+    read -r -p "Type the word yes to continue: " answer
+    if [ "${answer}" != "yes" ]; then
+        echo "Aborted"
+        exit 1
+    fi
+fi
+
+# nvme0n1 and mmcblk0 name their partitions nvme0n1p1 and mmcblk0p1
+partition="${target}1"
+if [[ ${target: -1} == [0-9] ]]; then
+    partition="${target}p1"
+fi
+
+mountpoint="$(mktemp -d)"
+cleanup() {
+    umount -R "${mountpoint}" 2> /dev/null || true
+    rmdir "${mountpoint}" 2> /dev/null || true
+}
+trap 'cleanup' EXIT
+
+echo "Creating a single partition on ${target}"
+wipefs -a "${target}" > /dev/null
+sgdisk --zap-all "${target}" > /dev/null
+# Leave the first 16 MiB alone, that is where U-Boot goes on a bootable disk
+sgdisk -n 1:32768:0 -t 1:8300 -c 1:"${label}" "${target}" > /dev/null
+partprobe "${target}"
+udevadm settle
+
+until [ -b "${partition}" ]; do sleep 1; done
+
+echo "Creating a filesystem on ${partition}"
+mkfs.ext4 -q -F -L "${label}" "${partition}"
+mount "${partition}" "${mountpoint}"
+
+echo "Copying the system, this takes a while"
+excludes=()
+if [ "${boot_where}" == "current" ]; then
+    # Shadowed by the bind mount of the boot disk, no point in copying it
+    excludes+=(--exclude=/boot/*)
+fi
+rsync -aHAXx --info=progress2 "${excludes[@]}" / "${mountpoint}/"
+
+target_uuid="$(blkid -s UUID -o value "${partition}")"
+root_uuid="$(findmnt -no UUID /)"
+
+echo "Writing ${mountpoint}/etc/fstab"
+{
+    echo "# <file system>     <mount point>  <type>  <options>   <dump>  <fsck>"
+    echo "UUID=${target_uuid} /              ext4    defaults    0       1"
+    if [ "${boot_where}" == "current" ]; then
+        echo "UUID=${root_uuid} /mnt/bootdisk  ext4    defaults    0       2"
+        echo "/mnt/bootdisk/boot /boot         none    bind        0       0"
+    fi
+} > "${mountpoint}/etc/fstab"
+mkdir -p "${mountpoint}/mnt/bootdisk" "${mountpoint}/boot"
+
+# u-boot-update reads this to decide what root= to put in extlinux.conf, and
+# the installed system needs it too so that later kernel updates keep it
+echo "Pinning the root filesystem for u-boot-update"
+for root_dir in "" "${mountpoint}"; do
+    mkdir -p "${root_dir}/etc/u-boot-menu/conf.d"
+    echo "U_BOOT_ROOT=\"root=UUID=${target_uuid}\"" \
+        > "${root_dir}/etc/u-boot-menu/conf.d/50-installed-root.conf"
+done
+
+if [ "${bootloader}" == "Y" ]; then
+    echo "Writing U-Boot to ${target}"
+    dd if=/usr/lib/u-boot/u-boot-rockchip.bin of="${target}" seek=1 bs=32k conv=fsync status=none
+fi
+
+if [ "${boot_where}" == "target" ]; then
+    echo "Updating extlinux on ${partition}"
+    for dir in dev dev/pts proc sys; do
+        mount --rbind "/${dir}" "${mountpoint}/${dir}"
+    done
+    chroot "${mountpoint}" u-boot-update
+    for dir in sys proc dev/pts dev; do
+        umount -lf "${mountpoint}/${dir}" 2> /dev/null || true
+    done
+else
+    echo "Updating extlinux on /dev/${root_parent}"
+    u-boot-update
+fi
+
+sync
+cleanup
+trap '' EXIT
+
+echo
+echo "Installed to ${target}. Reboot to use it."
+if [ "${boot_where}" == "current" ]; then
+    echo "The bootloader keeps reading /dev/${root_parent}, which the installed"
+    echo "system mounts at /mnt/bootdisk so that kernel updates land there."
+fi

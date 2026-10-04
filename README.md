@@ -133,6 +133,32 @@ example) `lb build` fails at that point, the build continues with a complete
 but snapless rootfs, and the log says so. Images built on the `ubuntu-26.04`
 runner get the seeded snaps.
 
+## Installing to another disk
+
+`ubuntu-rockchip-install` copies the running system onto another disk, which
+replaces the helper of the same name from the ppa only settings package:
+
+```shell
+sudo ubuntu-rockchip-install --boot=current /dev/nvme0n1
+```
+
+`--boot` decides where the kernel, the initrd and the extlinux config end up:
+
+* `target`, the default, puts them on the target disk, which the bootloader has
+  to be able to read. The installer chroots into the new system to write its
+  extlinux config.
+* `current` keeps them on the disk the board boots from and has the installed
+  system mount that disk at `/mnt/bootdisk`, with `/mnt/bootdisk/boot` bind
+  mounted over `/boot`, so a later kernel update still lands where the
+  bootloader reads it.
+
+The Turing RK1 needs `--boot=current` for an NVMe target: its U-Boot does not
+bring up the PCIe link, so it cannot read a kernel from the drive even though
+Linux uses it fine. The boot rom cannot load a bootloader from NVMe either, so
+U-Boot always stays on the eMMC or the SPI flash; it is only written to the
+target for sd and eMMC targets, and `--bootloader` or `--no-bootloader` override
+that.
+
 ## Support the Project
 
 There are a few things you can do to support the project:
