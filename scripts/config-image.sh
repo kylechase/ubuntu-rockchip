@@ -41,7 +41,10 @@ if [[ ${LAUNCHPAD} != "Y" ]]; then
         echo 'Error: could not find the u-boot package'
         exit 1
     fi
+fi
 
+# Suites that take the kernel from the Ubuntu archive have none of these
+if [[ ${LAUNCHPAD} != "Y" && ${KERNEL_SOURCE} != "archive" ]]; then
     linux_image_package="$(basename "$(find linux-image-*.deb | sort | tail -n1)")"
     if [ ! -e "$linux_image_package" ]; then
         echo "Error: could not find the linux image package"
@@ -147,7 +150,11 @@ else
     cp "${uboot_package}" ${chroot_dir}/tmp/
     chroot ${chroot_dir} dpkg -i "/tmp/${uboot_package}"
     chroot ${chroot_dir} apt-mark hold "$(echo "${uboot_package}" | sed -rn 's/(.*)_[[:digit:]].*/\1/p')"
+fi
 
+# Install the Linux kernel built by scripts/build-kernel.sh, suites that use the
+# kernel from the Ubuntu archive keep the one the rootfs was built with
+if [[ ${LAUNCHPAD} != "Y" && ${KERNEL_SOURCE} != "archive" ]]; then
     cp "${linux_image_package}" "${linux_headers_package}" "${linux_modules_package}" "${linux_buildinfo_package}" "${linux_rockchip_headers_package}" ${chroot_dir}/tmp/
     chroot ${chroot_dir} /bin/bash -c "apt-get -y purge \$(dpkg --list | grep -Ei 'linux-image|linux-headers|linux-modules|linux-rockchip' | awk '{ print \$2 }')"
     chroot ${chroot_dir} /bin/bash -c "dpkg -i /tmp/{${linux_image_package},${linux_modules_package},${linux_buildinfo_package},${linux_rockchip_headers_package}}"
@@ -155,6 +162,50 @@ else
     chroot ${chroot_dir} apt-mark hold "$(echo "${linux_modules_package}" | sed -rn 's/(.*)_[[:digit:]].*/\1/p')"
     chroot ${chroot_dir} apt-mark hold "$(echo "${linux_buildinfo_package}" | sed -rn 's/(.*)_[[:digit:]].*/\1/p')"
     chroot ${chroot_dir} apt-mark hold "$(echo "${linux_rockchip_headers_package}" | sed -rn 's/(.*)_[[:digit:]].*/\1/p')"
+fi
+
+# chrony takes the NTP servers handed out by DHCP from /run/chrony-dhcp, which
+# its packaging fills in from a dhclient hook. These images do DHCP with
+# systemd-networkd, so without a networkd-dispatcher hook that directory stays
+# empty and a time server advertised by DHCP, often the only one reachable on
+# an isolated network, is ignored.
+if [ -f "${chroot_dir}/etc/chrony/chrony.conf" ] && \
+   [ -d "${chroot_dir}/etc/networkd-dispatcher" ] && \
+   ! chroot "${chroot_dir}" dpkg-query -W -f='${Status}' isc-dhcp-client 2>/dev/null | grep -q "^install ok installed"; then
+    install -D -m 755 "${overlay_dir}/usr/lib/ubuntu-rockchip/networkd-ntp-servers" \
+        "${chroot_dir}/usr/lib/ubuntu-rockchip/networkd-ntp-servers"
+    install -D -m 755 "${overlay_dir}/etc/networkd-dispatcher/routable.d/50-chrony-dhcp-ntp" \
+        "${chroot_dir}/etc/networkd-dispatcher/routable.d/50-chrony-dhcp-ntp"
+    install -D -m 755 "${overlay_dir}/etc/networkd-dispatcher/off.d/50-chrony-dhcp-ntp" \
+        "${chroot_dir}/etc/networkd-dispatcher/off.d/50-chrony-dhcp-ntp"
+    echo "Installed the networkd to chrony hook for DHCP provided NTP servers"
+
+    # Adding that unauthenticated source makes chrony require the NTS pools,
+    # which leaves a board that cannot reach them unsynchronised even with a
+    # working local server, so take authentication out of the selection
+    install -D -m 644 "${overlay_dir}/etc/chrony/conf.d/50-ubuntu-rockchip-authselect.conf" \
+        "${chroot_dir}/etc/chrony/conf.d/50-ubuntu-rockchip-authselect.conf"
+fi
+
+# Extra kernel parameters, for debugging a board without editing an image
+if [[ -n ${KERNEL_CMDLINE_EXTRA} ]]; then
+    echo -n " ${KERNEL_CMDLINE_EXTRA}" >> "${chroot_dir}/etc/kernel/cmdline"
+    echo "Appended to the kernel command line: ${KERNEL_CMDLINE_EXTRA}"
+fi
+
+# Ubuntu builds the arm64 kernel as an EFI zboot image, which U-Boot cannot
+# boot with booti, so unwrap it into a bare Image. The kernel postinst hook
+# keeps doing that for every kernel installed later.
+if [[ ${KERNEL_SOURCE} == "archive" ]]; then
+    install -D -m 755 "${overlay_dir}/usr/lib/ubuntu-rockchip/extract-efi-zboot" \
+        "${chroot_dir}/usr/lib/ubuntu-rockchip/extract-efi-zboot"
+    install -D -m 755 "${overlay_dir}/etc/kernel/postinst.d/zz-efi-zboot-extract" \
+        "${chroot_dir}/etc/kernel/postinst.d/zz-efi-zboot-extract"
+
+    for kernel in "${chroot_dir}"/boot/vmlinuz-*; do
+        [ -e "${kernel}" ] || continue
+        chroot "${chroot_dir}" /etc/kernel/postinst.d/zz-efi-zboot-extract "${kernel##*/vmlinuz-}"
+    done
 fi
 
 # Update the initramfs

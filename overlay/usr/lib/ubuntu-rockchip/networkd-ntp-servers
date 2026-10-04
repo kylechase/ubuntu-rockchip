@@ -1,0 +1,120 @@
+#!/usr/bin/python3
+"""Print the NTP servers systemd-networkd has for an interface, one per line.
+
+The servers are the ones handed out by DHCP or router advertisements.
+networkctl is asked first; if its output cannot be used, the state file
+networkd keeps for the link is read instead.
+"""
+
+import ipaddress
+import json
+import subprocess
+import sys
+
+
+def packed(value):
+    """networkctl gives an address as the list of bytes that make it up."""
+    if not isinstance(value, list) or len(value) not in (4, 16):
+        return None
+    if not all(isinstance(item, int) and 0 <= item <= 255 for item in value):
+        return None
+    try:
+        return str(ipaddress.ip_address(bytes(value)))
+    except ValueError:
+        return None
+
+
+def addresses(value):
+    """Collect anything that looks like an address out of a JSON value."""
+    found = []
+
+    address = packed(value)
+    if address:
+        return [address]
+
+    if isinstance(value, str):
+        found.append(value)
+    elif isinstance(value, list):
+        for item in value:
+            found += addresses(item)
+    elif isinstance(value, dict):
+        # networkctl reports a server as an object, the key naming the address
+        # has changed over time, so take whichever one is there
+        for key in ("Address", "Server", "ServerAddress", "ServerName", "Name"):
+            if key in value:
+                found += addresses(value[key])
+                break
+        else:
+            # An address can also arrive as a list of bytes
+            if "Family" in value and "Address" in value:
+                found += addresses(value["Address"])
+
+    return found
+
+
+def from_networkctl(iface):
+    try:
+        out = subprocess.run(
+            ["networkctl", "status", "--json=short", iface],
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=10).stdout
+        data = json.loads(out)
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+        return []
+
+    servers = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in ("NTP", "NTPServers", "NTPServer"):
+                    servers.extend(addresses(value))
+                else:
+                    walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(data)
+    return servers
+
+
+def from_state_file(iface):
+    """Fall back to the state file networkd writes per link."""
+    try:
+        with open(f"/sys/class/net/{iface}/ifindex", encoding="utf-8") as handle:
+            ifindex = handle.read().strip()
+        with open(f"/run/systemd/netif/links/{ifindex}", encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+    except OSError:
+        return []
+
+    servers = []
+    for line in lines:
+        if line.startswith("NTP="):
+            servers += line[len("NTP="):].split()
+    return servers
+
+
+def main():
+    if len(sys.argv) != 2:
+        raise SystemExit(f"Usage: {sys.argv[0]} interface")
+
+    iface = sys.argv[1]
+    seen = []
+    for server in from_networkctl(iface) or from_state_file(iface):
+        # A server can be given as a name, but only addresses are of interest
+        # here: a name could not be resolved yet at this point in the boot
+        try:
+            ipaddress.ip_address(server.strip("[]"))
+        except ValueError:
+            continue
+        if server not in seen:
+            seen.append(server)
+
+    for server in seen:
+        print(server)
+
+
+if __name__ == "__main__":
+    main()

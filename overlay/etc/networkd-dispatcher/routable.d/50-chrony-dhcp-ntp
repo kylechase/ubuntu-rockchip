@@ -1,0 +1,32 @@
+#!/bin/sh
+# Hand the NTP servers systemd-networkd learned over DHCP to chrony.
+#
+# chrony reads them from /run/chrony-dhcp, which its own packaging fills in
+# from /etc/dhcp/dhclient-exit-hooks.d/chrony. That hook needs dhclient, which
+# these images do not install, so without this nothing ever writes that
+# directory and a time server handed out by DHCP is ignored. On an isolated
+# network that server is often the only one reachable.
+
+set -e
+
+[ -n "${IFACE:-}" ] || exit 0
+[ -x /usr/bin/chronyc ] || exit 0
+[ -x /usr/lib/ubuntu-rockchip/networkd-ntp-servers ] || exit 0
+
+sourcedir=/run/chrony-dhcp
+serverfile="${sourcedir}/${IFACE}.sources"
+
+servers="$(/usr/lib/ubuntu-rockchip/networkd-ntp-servers "${IFACE}" || true)"
+
+if [ -z "${servers}" ]; then
+    [ -e "${serverfile}" ] || exit 0
+    rm -f "${serverfile}"
+else
+    mkdir -p "${sourcedir}"
+    for server in ${servers}; do
+        echo "server ${server} iburst"
+    done > "${serverfile}.new"
+    mv "${serverfile}.new" "${serverfile}"
+fi
+
+chronyc reload sources > /dev/null 2>&1 || :

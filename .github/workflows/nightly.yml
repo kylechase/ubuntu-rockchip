@@ -3,11 +3,12 @@ run-name: Nightly build
 on:
   schedule:
     - cron: "0 0 * * *"
+  workflow_dispatch:
 
 jobs:
 
   config:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     name: Create martrix
     outputs:
       build_matrix: ${{ steps.build.outputs.build_matrix }}
@@ -25,9 +26,23 @@ jobs:
                 COMPATIBLE_FLAVORS=()
                 # shellcheck disable=SC1090
                 source "${file}"
+                board="$(basename "${file%.sh}")"
                 for suite in "${COMPATIBLE_SUITES[@]}"; do
+                    SUITE_FLAVORS=()
+                    BUILD_RUNNER=""
+                    KERNEL_SOURCE=""
+                    # shellcheck disable=SC1090
+                    source "config/suites/${suite}.sh"
+                    # Suites built against the Ubuntu archive have no ppa packages
+                    flags="--launchpad"
+                    if [ "${KERNEL_SOURCE}" == "archive" ]; then
+                        flags=""
+                    fi
                     for flavor in "${COMPATIBLE_FLAVORS[@]}"; do
-                    build_matrix+="{\"board\":\"$(basename "${file%.sh}")\",\"suite\":\"${suite}\",\"flavor\":\"${flavor}\"},"
+                        if [ -n "${SUITE_FLAVORS[*]}" ] && [[ ! " ${SUITE_FLAVORS[*]} " =~ [[:space:]]${flavor}[[:space:]] ]]; then
+                            continue
+                        fi
+                        build_matrix+="{\"board\":\"${board}\",\"suite\":\"${suite}\",\"flavor\":\"${flavor}\",\"runner\":\"${BUILD_RUNNER:-ubuntu-24.04}\",\"flags\":\"${flags}\"},"
                     done
                 done
             done
@@ -37,15 +52,29 @@ jobs:
         id: rootfs
         run: |
             rootfs_matrix=""
-            for suite in config/suites/*; do
+            for file in config/suites/*; do
+                SUITE_FLAVORS=()
+                BUILD_RUNNER=""
+                KERNEL_SOURCE=""
+                # shellcheck disable=SC1090
+                source "${file}"
+                suite="$(basename "${file%.sh}")"
+                flags="--launchpad"
+                if [ "${KERNEL_SOURCE}" == "archive" ]; then
+                    flags=""
+                fi
                 for flavor in config/flavors/*; do
-                    rootfs_matrix+="{\"suite\":\"$(basename "${suite%.sh}")\",\"flavor\":\"$(basename "${flavor%.sh}")\"},"
+                    flavor="$(basename "${flavor%.sh}")"
+                    if [ -n "${SUITE_FLAVORS[*]}" ] && [[ ! " ${SUITE_FLAVORS[*]} " =~ [[:space:]]${flavor}[[:space:]] ]]; then
+                        continue
+                    fi
+                    rootfs_matrix+="{\"suite\":\"${suite}\",\"flavor\":\"${flavor}\",\"runner\":\"${BUILD_RUNNER:-ubuntu-24.04}\",\"flags\":\"${flags}\"},"
                 done
             done
             echo "rootfs_matrix={\"include\":[${rootfs_matrix::-1}]}" >> $GITHUB_OUTPUT
 
   rootfs:
-    runs-on: ubuntu-22.04
+    runs-on: ${{ matrix.runner }}
     name: Build rootfs 
     needs: [config]
     strategy:
@@ -73,17 +102,21 @@ jobs:
       - name: Install dependencies
         shell: bash
         run: |
-          sudo apt-get update && sudo apt-get upgrade -y
+          sudo apt-get update
           sudo apt-get install -y build-essential gcc-aarch64-linux-gnu bison \
-          qemu-user-static qemu-system-arm qemu-efi u-boot-tools binfmt-support \
-          debootstrap flex libssl-dev bc rsync kmod cpio xz-utils fakeroot parted \
-          udev dosfstools uuid-runtime git-lfs device-tree-compiler python2 python3 \
-          python-is-python3 fdisk bc debhelper python3-pyelftools python3-setuptools \
-          python3-distutils python3-pkg-resources swig libfdt-dev libpython3-dev dctrl-tools
+          flex libssl-dev bc rsync kmod cpio xz-utils fakeroot parted udev \
+          dosfstools uuid-runtime device-tree-compiler python3 python-is-python3 \
+          python3-pyelftools python3-setuptools fdisk debhelper dpkg-dev swig \
+          libfdt-dev libpython3-dev dctrl-tools u-boot-tools debootstrap \
+          distro-info mtools gdisk zstd qemu-user
+
+      - name: Register binfmt handlers for arm64
+        shell: bash
+        run: docker run --privileged --rm tonistiigi/binfmt --install arm64
 
       - name: Build
         shell: bash
-        run: sudo ./build.sh --suite=${{ matrix.suite }} --flavor=${{ matrix.flavor }} --rootfs-only --launchpad
+        run: sudo ./build.sh --suite=${{ matrix.suite }} --flavor=${{ matrix.flavor }} --rootfs-only ${{ matrix.flags }}
 
       - name: Upload
         uses: actions/upload-artifact@v4.3.3
@@ -93,7 +126,7 @@ jobs:
             if-no-files-found: error
 
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ${{ matrix.runner }}
     needs: [rootfs, config]
     name: Build image 
     strategy:
@@ -127,17 +160,21 @@ jobs:
       - name: Install dependencies
         shell: bash
         run: |
-          sudo apt-get update && sudo apt-get upgrade -y
+          sudo apt-get update
           sudo apt-get install -y build-essential gcc-aarch64-linux-gnu bison \
-          qemu-user-static qemu-system-arm qemu-efi u-boot-tools binfmt-support \
-          debootstrap flex libssl-dev bc rsync kmod cpio xz-utils fakeroot parted \
-          udev dosfstools uuid-runtime git-lfs device-tree-compiler python2 python3 \
-          python-is-python3 fdisk bc debhelper python3-pyelftools python3-setuptools \
-          python3-distutils python3-pkg-resources swig libfdt-dev libpython3-dev dctrl-tools
+          flex libssl-dev bc rsync kmod cpio xz-utils fakeroot parted udev \
+          dosfstools uuid-runtime device-tree-compiler python3 python-is-python3 \
+          python3-pyelftools python3-setuptools fdisk debhelper dpkg-dev swig \
+          libfdt-dev libpython3-dev dctrl-tools u-boot-tools debootstrap \
+          distro-info mtools gdisk zstd qemu-user
+
+      - name: Register binfmt handlers for arm64
+        shell: bash
+        run: docker run --privileged --rm tonistiigi/binfmt --install arm64
 
       - name: Build
         shell: bash
-        run: sudo ./build.sh --board=${{ matrix.board }} --suite=${{ matrix.suite }} --flavor=${{ matrix.flavor }} --launchpad
+        run: sudo ./build.sh --board=${{ matrix.board }} --suite=${{ matrix.suite }} --flavor=${{ matrix.flavor }} ${{ matrix.flags }}
 
       - name: Upload
         uses: actions/upload-artifact@v4.3.3

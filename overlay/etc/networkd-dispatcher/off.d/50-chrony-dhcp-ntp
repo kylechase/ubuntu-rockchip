@@ -1,0 +1,14 @@
+#!/bin/sh
+# Drop the DHCP NTP servers of an interface that is no longer up, the
+# counterpart of routable.d/50-chrony-dhcp-ntp.
+
+set -e
+
+[ -n "${IFACE:-}" ] || exit 0
+[ -x /usr/bin/chronyc ] || exit 0
+
+serverfile="/run/chrony-dhcp/${IFACE}.sources"
+[ -e "${serverfile}" ] || exit 0
+
+rm -f "${serverfile}"
+chronyc reload sources > /dev/null 2>&1 || :

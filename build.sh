@@ -7,7 +7,7 @@ cd "$(dirname -- "$(readlink -f -- "$0")")"
 
 usage() {
 cat << HEREDOC
-Usage: $0 --board=[orangepi-5] --suite=[jammy|noble] --flavor=[server|desktop]
+Usage: $0 --board=[orangepi-5] --suite=[jammy|noble|resolute] --flavor=[server|desktop]
 
 Required arguments:
   -b, --board=BOARD      target board 
@@ -159,6 +159,23 @@ if [ -n "${BOARD}" ]; then
     done
 fi
 
+# Not every suite supports every flavor
+if [ -n "${SUITE}" ] && [ -n "${FLAVOR}" ] && [ -n "${SUITE_FLAVORS[*]}" ]; then
+    if [[ ! " ${SUITE_FLAVORS[*]} " =~ [[:space:]]${FLAVOR}[[:space:]] ]]; then
+        echo "Error: the ${SUITE} suite does not support the ${FLAVOR} flavor"
+        echo "Supported flavors: ${SUITE_FLAVORS[*]}"
+        exit 1
+    fi
+fi
+
+# Suites built against the Ubuntu archive have no packages on launchpad
+if [ "${LAUNCHPAD}" == "Y" ] && [ "${KERNEL_SOURCE}" == "archive" ]; then
+    echo "Error: --launchpad is not supported for the ${SUITE} suite"
+    echo "There is no rockchip ppa for this suite, so the kernel comes from the"
+    echo "Ubuntu archive and U-Boot is built from source"
+    exit 1
+fi
+
 if [ "${CLEAN}" == "Y" ]; then
     if [ -d build/rootfs ]; then
         umount -lf build/rootfs/dev/pts 2> /dev/null || true
@@ -172,6 +189,10 @@ mkdir -p build/logs && exec > >(tee "build/logs/build-$(date +"%Y%m%d%H%M%S").lo
 if [ "${KERNEL_ONLY}" == "Y" ]; then
     if [ -z "${SUITE}" ]; then
         usage
+        exit 1
+    fi
+    if [ "${KERNEL_SOURCE}" == "archive" ]; then
+        echo "Error: the ${SUITE} suite uses the kernel from the Ubuntu archive"
         exit 1
     fi
     ./scripts/build-kernel.sh
@@ -203,7 +224,7 @@ if [ -z "${BOARD}" ] || [ -z "${SUITE}" ] || [ -z "${FLAVOR}" ]; then
 fi
 
 # Build the Linux kernel if not found
-if [[ ${LAUNCHPAD} != "Y" ]]; then
+if [[ ${LAUNCHPAD} != "Y" && ${KERNEL_SOURCE} != "archive" ]]; then
     if [[ ! -e "$(find build/linux-image-*.deb | sort | tail -n1)" || ! -e "$(find build/linux-headers-*.deb | sort | tail -n1)" ]]; then
         ./scripts/build-kernel.sh
     fi

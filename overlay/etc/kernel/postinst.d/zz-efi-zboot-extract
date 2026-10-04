@@ -1,0 +1,14 @@
+#!/bin/sh
+# Unwrap the EFI zboot kernel that was just installed into a bare arm64 Image,
+# which is the only thing U-Boot can boot with booti. Runs before
+# zz-u-boot-menu, which writes the extlinux entry pointing at this file.
+
+set -e
+
+version="$1"
+[ -n "${version}" ] || exit 0
+
+vmlinuz="/boot/vmlinuz-${version}"
+[ -e "${vmlinuz}" ] || exit 0
+
+exec /usr/lib/ubuntu-rockchip/extract-efi-zboot "${vmlinuz}" "${vmlinuz}"

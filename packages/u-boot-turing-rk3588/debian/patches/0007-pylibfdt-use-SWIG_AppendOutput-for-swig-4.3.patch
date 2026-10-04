@@ -1,0 +1,41 @@
+From: Kyle Chase <thekylechase@gmail.com>
+Date: Sun, 4 Oct 2026 01:50:00 -0600
+Subject: [PATCH] pylibfdt: use SWIG_AppendOutput for swig 4.3 and later
+
+SWIG 4.3 added a third argument to SWIG_Python_AppendOutput, so building
+pylibfdt with the swig of Ubuntu 26.04 (4.4.0) fails with "too few
+arguments to function 'SWIG_Python_AppendOutput'". The SWIG_AppendOutput
+macro hides the difference and is what upstream dtc and U-Boot use now.
+---
+ scripts/dtc/pylibfdt/libfdt.i_shipped | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+--- a/scripts/dtc/pylibfdt/libfdt.i_shipped
++++ b/scripts/dtc/pylibfdt/libfdt.i_shipped
+@@ -1037,7 +1037,7 @@
+ 			fdt_string(fdt1, fdt32_to_cpu($1->nameoff)));
+ 		buff = PyByteArray_FromStringAndSize(
+ 			(const char *)($1 + 1), fdt32_to_cpu($1->len));
+-		resultobj = SWIG_Python_AppendOutput(resultobj, buff);
++		resultobj = SWIG_AppendOutput(resultobj, buff);
+ 	}
+ }
+ 
+@@ -1076,7 +1076,7 @@
+ 
+ %typemap(argout) int *depth {
+         PyObject *val = Py_BuildValue("i", *arg$argnum);
+-        resultobj = SWIG_Python_AppendOutput(resultobj, val);
++        resultobj = SWIG_AppendOutput(resultobj, val);
+ }
+ 
+ %apply int *depth { int *depth };
+@@ -1092,7 +1092,7 @@
+            if (PyTuple_GET_SIZE(resultobj) == 0)
+               resultobj = val;
+            else
+-              resultobj = SWIG_Python_AppendOutput(resultobj, val);
++              resultobj = SWIG_AppendOutput(resultobj, val);
+         }
+ }
+ 

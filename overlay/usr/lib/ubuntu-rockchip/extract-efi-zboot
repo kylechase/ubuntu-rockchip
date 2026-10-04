@@ -1,0 +1,140 @@
+#!/usr/bin/python3
+"""Unwrap an EFI zboot kernel into a bare arm64 Image.
+
+Ubuntu builds the arm64 kernel with CONFIG_EFI_ZBOOT, so /boot/vmlinuz-* is a
+PE32+ EFI application holding the real kernel compressed inside it, wrapped
+once more in a unified image that carries .hwids, .sbat and the .dtbauto
+device trees. U-Boot boots with booti, which takes a bare Image only, so the
+payload has to be unwrapped before extlinux can boot the kernel.
+
+Decompression uses the standard library where it can, so that the images do
+not need a decompressor installed to survive a kernel upgrade.
+"""
+
+import gzip
+import lzma
+import os
+import struct
+import subprocess
+import sys
+import tempfile
+
+ARM64_MAGIC = b"ARM\x64"
+MAGIC_OFFSET = 56
+
+
+def zstd_decompress(data):
+    try:
+        from compression.zstd import decompress        # Python 3.14 and later
+    except ImportError:
+        return shell_decompress(["zstd", "-d", "-c"], data)
+    return decompress(data)
+
+
+def shell_decompress(argv, data):
+    try:
+        return subprocess.run(argv, input=data, check=True,
+                              stdout=subprocess.PIPE).stdout
+    except FileNotFoundError:
+        raise SystemExit(f"{argv[0]} is not installed")
+
+
+DECOMPRESSORS = (
+    (b"\x28\xb5\x2f\xfd", zstd_decompress),
+    (b"\x1f\x8b", gzip.decompress),
+    (b"\xfd7zXZ", lzma.decompress),
+    (b"\x5d\x00\x00", lzma.decompress),
+    (b"\x04\x22\x4d\x18", lambda data: shell_decompress(["lz4", "-d", "-c"], data)),
+    (b"\x02\x21\x4c\x18", lambda data: shell_decompress(["lz4", "-d", "-c"], data)),
+)
+
+
+def is_image(blob):
+    """An arm64 Image carries its magic at a fixed offset. Neither wrapper
+    does, even though both start with the MZ of a PE image, as does an Image
+    built with the EFI stub."""
+    return blob[MAGIC_OFFSET:MAGIC_OFFSET + 4] == ARM64_MAGIC
+
+
+def pe_section(blob, want):
+    """Return the raw bytes of a named section of a PE image, or None."""
+    if blob[:2] != b"MZ":
+        return None
+
+    pe_offset, = struct.unpack_from("<I", blob, 0x3C)
+    if blob[pe_offset:pe_offset + 4] != b"PE\x00\x00":
+        return None
+
+    count, = struct.unpack_from("<H", blob, pe_offset + 6)
+    optional_size, = struct.unpack_from("<H", blob, pe_offset + 20)
+    table = pe_offset + 24 + optional_size
+
+    for index in range(count):
+        name, _vsize, _vaddr, size, offset = struct.unpack_from(
+            "<8sIIII", blob, table + index * 40)
+        if name.rstrip(b"\x00") == want:
+            return blob[offset:offset + size]
+
+    return None
+
+
+def zboot_payload(blob):
+    """Return the compressed kernel held by an EFI zboot image."""
+    offset, size = struct.unpack_from("<II", blob, 8)
+    compression = blob[24:56].rstrip(b"\x00").decode(errors="replace")
+    if not offset or not size or offset + size > len(blob):
+        raise SystemExit(f"unusable zboot header (compression {compression})")
+    return blob[offset:offset + size]
+
+
+def compressed_kernel(blob):
+    """Dig the compressed kernel out of however many wrappers it has."""
+    if blob[4:8] == b"zimg":
+        return zboot_payload(blob)
+
+    inner = pe_section(blob, b".linux")
+    if inner is None:
+        raise SystemExit("no .linux section and no zboot header")
+    if inner[4:8] != b"zimg":
+        raise SystemExit("the .linux section is not an EFI zboot image")
+    return zboot_payload(inner)
+
+
+def decompress(data):
+    for magic, decompressor in DECOMPRESSORS:
+        if data.startswith(magic):
+            return decompressor(data)
+    raise SystemExit("the kernel payload is in an unknown compression format")
+
+
+def main():
+    if len(sys.argv) != 3:
+        raise SystemExit(f"Usage: {sys.argv[0]} vmlinuz image")
+
+    source, target = sys.argv[1], sys.argv[2]
+    with open(source, "rb") as handle:
+        blob = handle.read()
+
+    if is_image(blob):
+        print(f"{source} is already a bare Image")
+        return
+
+    image = decompress(compressed_kernel(blob))
+
+    if not is_image(image):
+        raise SystemExit(f"{source}: the payload is not an arm64 Image")
+
+    # Swap it in with a rename, a half written kernel must never be left behind
+    directory = os.path.dirname(os.path.abspath(target))
+    with tempfile.NamedTemporaryFile(dir=directory, delete=False) as tmp:
+        tmp.write(image)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+        os.chmod(tmp.name, 0o600)
+        os.replace(tmp.name, target)
+
+    print(f"Unwrapped {source} into a bare Image ({len(image)} bytes)")
+
+
+if __name__ == "__main__":
+    main()
