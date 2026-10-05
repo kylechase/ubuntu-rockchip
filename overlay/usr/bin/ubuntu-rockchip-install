@@ -157,7 +157,16 @@ echo
 echo "  everything on ${target} will be erased"
 echo "  /boot will live on $([ "${boot_where}" == "target" ] && echo "${target}" || echo "/dev/${root_parent}")"
 echo "  U-Boot will $([ "${bootloader}" == "Y" ] && echo "be written to ${target}" || echo "not be touched")"
-echo
+case "${boot_where}:${target}" in
+    target:/dev/mmcblk*) ;;
+    target:*)
+        echo "  note: the bootloader has to be able to read ${target} to boot this."
+        echo "        U-Boot on some boards, the Turing RK1 among them, does not bring"
+        echo "        up PCIe and cannot read an NVMe drive. Check with \"nvme scan\" at"
+        echo "        the U-Boot prompt, or use --boot=current to keep /boot where it is."
+        echo
+        ;;
+esac
 if [ "${assume_yes}" != "Y" ]; then
     read -r -p "Type the word yes to continue: " answer
     if [ "${answer}" != "yes" ]; then
@@ -215,10 +224,17 @@ echo "Writing ${mountpoint}/etc/fstab"
 } > "${mountpoint}/etc/fstab"
 mkdir -p "${mountpoint}/mnt/bootdisk" "${mountpoint}/boot"
 
-# u-boot-update reads this to decide what root= to put in extlinux.conf, and
-# the installed system needs it too so that later kernel updates keep it
+# u-boot-update reads this to decide what root= to put in extlinux.conf. The
+# installed system always needs it. The system running now only gets it with
+# --boot=current, where its extlinux config is the one being booted; pinning it
+# in the other case would make a later kernel update on this system repoint its
+# own extlinux config at the target disk.
 echo "Pinning the root filesystem for u-boot-update"
-for root_dir in "" "${mountpoint}"; do
+pin_dirs=("${mountpoint}")
+if [ "${boot_where}" == "current" ]; then
+    pin_dirs+=("")
+fi
+for root_dir in "${pin_dirs[@]}"; do
     mkdir -p "${root_dir}/etc/u-boot-menu/conf.d"
     echo "U_BOOT_ROOT=\"root=UUID=${target_uuid}\"" \
         > "${root_dir}/etc/u-boot-menu/conf.d/50-installed-root.conf"
