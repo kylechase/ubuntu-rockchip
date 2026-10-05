@@ -152,12 +152,19 @@ sudo ubuntu-rockchip-install --boot=current /dev/nvme0n1
   mounted over `/boot`, so a later kernel update still lands where the
   bootloader reads it.
 
-The Turing RK1 needs `--boot=current` for an NVMe target: its U-Boot does not
-bring up the PCIe link, so it cannot read a kernel from the drive even though
-Linux uses it fine. The boot rom cannot load a bootloader from NVMe either, so
-U-Boot always stays on the eMMC or the SPI flash; it is only written to the
-target for sd and eMMC targets, and `--bootloader` or `--no-bootloader` override
-that.
+The default works on the Turing RK1: its U-Boot reads an NVMe drive, and its
+boot order tries `nvme` before `mmc0`, so the installed system is booted and the
+eMMC is left as a fallback. `--boot=current` is for a board whose bootloader
+cannot read the target disk.
+
+The boot rom cannot load a bootloader from NVMe, so U-Boot itself always stays
+on the eMMC or the SPI flash. It is written to the target only for sd and eMMC
+targets; `--bootloader` and `--no-bootloader` override that.
+
+Installing to NVMe leaves the eMMC bootable with its own root, but a kernel
+update made while booted from the eMMC regenerates its extlinux config, so keep
+`/etc/u-boot-menu/conf.d/50-installed-root.conf` out of the system that is not
+the one being booted.
 
 ## Support the Project
 

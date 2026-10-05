@@ -161,9 +161,9 @@ case "${boot_where}:${target}" in
     target:/dev/mmcblk*) ;;
     target:*)
         echo "  note: the bootloader has to be able to read ${target} to boot this."
-        echo "        U-Boot on some boards, the Turing RK1 among them, does not bring"
-        echo "        up PCIe and cannot read an NVMe drive. Check with \"nvme scan\" at"
-        echo "        the U-Boot prompt, or use --boot=current to keep /boot where it is."
+        echo "        U-Boot reads NVMe on the Turing RK1, but not every board brings up"
+        echo "        PCIe before boot. Check with \"nvme scan\" at the U-Boot prompt if"
+        echo "        unsure, or use --boot=current to keep /boot where it is."
         echo
         ;;
 esac
